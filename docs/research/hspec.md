@@ -22,7 +22,8 @@ end-to-end reproduction of the paper's throughput or acceptance results.
   Mamba-2/SSD inference kernel or a throughput result.
 - DSpark-style low-rank Markov logit bias conditioned on the previous **known**
   token during teacher-forced training. The reference includes a one-block
-  training path with frozen target output and 0.1 CE + 0.9 TV loss.
+  training path with frozen target output, 0.1 CE + 0.9 TV loss, and DFlash's
+  position weighting `exp(-(k-1)/4)` for draft positions `k=1..7`.
 
 ## Run a small alignment/training check
 
@@ -54,8 +55,9 @@ prepared texts and target revision for a comparable run.
    contain hidden states but do not supply target K/V to the drafter. Do not
    use a full-sequence last hidden for every anchor or include future K/V.
 3. Match the published training corpus, packed sampling, target-generated
-   responses, 32K vocabulary pruning, target LM-head weights, optimizer
-   schedule and 0.1 CE + 0.9 TV loss with position weighting.
+   responses, 32K vocabulary pruning, target LM-head weights, and optimizer
+   schedule. The reference loss now applies CE/TV and position weighting, but
+   the packed Speculators training loop is still needed.
 4. Extend vLLM's speculative drafter/target interface so the three H-Spec
    attention layers read the verifier's **paged** KV blocks in place. The
    Qwen3 query layout, RoPE positions, TP shards, window, request block table

@@ -108,8 +108,9 @@ def ce_tv_loss(
     teacher_logits: torch.Tensor,
     labels: torch.Tensor,
     ce_weight: float = 0.1,
+    decay_gamma: float = 4.0,
 ) -> torch.Tensor:
-    """Paper's 0.1 CE + 0.9 total-variation loss on the predicted positions.
+    """Position-weighted CE + TV loss, matching DFlash's reduction.
 
     ``draft_logits`` has the unused anchor logit at slot zero. ``labels`` and
     ``teacher_logits`` contain only k actual continuation positions.
@@ -117,12 +118,12 @@ def ce_tv_loss(
     predicted = draft_logits[:, 1:].float()
     if predicted.shape != teacher_logits.shape or labels.shape != predicted.shape[:2]:
         raise ValueError("draft, teacher, and labels must align on k positions")
-    ce = functional.cross_entropy(predicted.flatten(0, 1), labels.reshape(-1))
-    tv = (
-        0.5
-        * (predicted.softmax(-1) - teacher_logits.float().softmax(-1))
-        .abs()
-        .sum(-1)
-        .mean()
+    if decay_gamma <= 0 or not 0 <= ce_weight <= 1:
+        raise ValueError("decay_gamma must be positive and ce_weight in [0, 1]")
+    ce = functional.cross_entropy(predicted.transpose(1, 2), labels, reduction="none")
+    tv = 0.5 * (predicted.softmax(-1) - teacher_logits.float().softmax(-1)).abs().sum(
+        -1
     )
-    return ce_weight * ce + (1.0 - ce_weight) * tv
+    positions = torch.arange(predicted.shape[1], device=predicted.device)
+    weights = torch.exp(-positions.float() / decay_gamma)
+    return ((ce_weight * ce + (1.0 - ce_weight) * tv) * weights).mean()

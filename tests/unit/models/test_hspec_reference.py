@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from torch.nn import functional
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
 from speculators.models.hspec import HSpecReference, HSpecReferenceConfig, TargetContext
@@ -156,3 +157,16 @@ def test_parallel_scan_matches_serial_forward_and_gradients(length):
     torch.testing.assert_close(parallel_output, serial_output, atol=1e-12, rtol=1e-12)
     for parallel, expected in zip(parallel_grads, serial_grads, strict=True):
         torch.testing.assert_close(parallel, expected, atol=1e-12, rtol=1e-12)
+
+
+def test_ce_tv_loss_uses_dflash_position_weights():
+    draft = torch.tensor([[[0.0, 0.0], [3.0, 0.0], [0.0, 2.0]]])
+    teacher = torch.tensor([[[2.0, 0.0], [0.0, 2.0]]])
+    labels = torch.tensor([[0, 1]])
+    ce = functional.cross_entropy(
+        draft[:, 1:].transpose(1, 2), labels, reduction="none"
+    )
+    tv = (draft[:, 1:].softmax(-1) - teacher.softmax(-1)).abs().sum(-1) / 2
+    weights = torch.exp(-torch.arange(2).float() / 4)
+    expected = ((0.1 * ce + 0.9 * tv) * weights).mean()
+    torch.testing.assert_close(ce_tv_loss(draft, teacher, labels), expected)
