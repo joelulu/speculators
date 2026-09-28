@@ -50,6 +50,23 @@ multipacking or the paper's 100K samples and five epochs. `reference_train.py`
 records the git SHA and run arguments next to the checkpoint. Save the
 prepared texts and target revision for a comparable run.
 
+To check greedy generation from that checkpoint with exact target verification:
+
+```bash
+python examples/hspec/reference_infer.py \
+  --target Qwen/Qwen3-8B \
+  --checkpoint /path/to/hspec_reference.pt \
+  --prompt 'Explain speculative decoding in one sentence.' \
+  --max-new-tokens 32
+```
+
+This offline demo makes one frozen-target forward for context extraction and
+another for verification per draft block, recomputing the full prefix each
+round. It accepts proposals only when they match the target's greedy choice;
+on rejection it emits the target choice. It is intentionally slow, supports
+greedy decoding only, and is not wired to the vLLM scheduler or sampler. A
+short smoke-test checkpoint will not have paper-level proposal quality.
+
 ## Required before claiming a full H-Spec reproduction
 
 1. Replace the PyTorch associative scan in `reference.py` with an optimized

@@ -1,5 +1,7 @@
 """Checks for H-Spec target-context isolation and first-block training alignment."""
 
+import importlib.util
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -18,6 +20,16 @@ from speculators.models.hspec.reference import (
     _parallel_state_scan,
 )
 from speculators.models.hspec.training import ce_tv_loss, training_block
+
+_infer_path = Path(__file__).resolve().parents[3] / "examples/hspec/reference_infer.py"
+_infer_spec = importlib.util.spec_from_file_location(
+    "hspec_reference_infer", _infer_path
+)
+assert _infer_spec is not None
+assert _infer_spec.loader is not None
+_infer_module = importlib.util.module_from_spec(_infer_spec)
+_infer_spec.loader.exec_module(_infer_module)
+greedy_verify_block = _infer_module.greedy_verify_block
 
 
 @pytest.fixture
@@ -215,3 +227,23 @@ def test_vllm_paged_bridge_matches_dense_window(config):
         expected = model(block, TargetContext(last_hidden, tuple(dense_kv), 7))
         actual = model(block, borrowed)
     torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.parametrize(
+    ("proposals", "expected", "accepted", "limit"),
+    [
+        ([4, 5, 6], [3], 0, 4),
+        ([3, 5, 6], [3, 7], 1, 4),
+        ([3, 7, 8], [3, 7, 8, 9], 3, 4),
+        ([3, 7, 8], [3, 7], 2, 2),
+    ],
+)
+def test_greedy_verifier_rejects_first_mismatch_and_bounds_extra_token(
+    proposals, expected, accepted, limit
+):
+    logits = torch.full((1, 4, 10), -1.0)
+    for index, token in enumerate([3, 7, 8, 9]):
+        logits[0, index, token] = 1.0
+    output, count = greedy_verify_block(logits, torch.tensor([proposals]), limit=limit)
+    assert output.tolist() == [expected]
+    assert count == accepted
