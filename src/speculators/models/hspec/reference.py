@@ -2,9 +2,9 @@
 
 This module is intentionally independent of vLLM's paged KV allocator. Prefix
 K/V tensors are borrowed from the target, never registered as model buffers or
-persisted in a drafter cache. The Mamba-2 state update below is an eager PyTorch
-reference, not the paper's parallel CUDA scan; benchmark only after replacing
-it with an initial-state-aware SSD kernel and wiring in-place paged KV access.
+persisted in a drafter cache. The Mamba-2 state update below uses a PyTorch
+associative scan, not the paper's fused CUDA scan; benchmark only after adding
+an optimized initial-state-aware SSD kernel and wiring in-place paged KV access.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from torch.nn import functional
 _HIDDEN_LAYERS = 5
 _KV_LAYERS = 3
 _BLOCK_RANK = 2
+_SCAN_RANK = 3
 
 
 @dataclass(frozen=True)
@@ -101,8 +102,9 @@ class SelectiveMamba2Reference(nn.Module):
 
     The convolution has zero block history. H-Spec supplies prefix context
     through the initial SSD state and attention; it does not keep conv history
-    between verified blocks. The eight block positions are scanned serially
-    here for easy correctness checks, so this is not a speed implementation.
+    between verified blocks. A logarithmic-depth associative scan evaluates
+    positions in parallel, but separate PyTorch launches are not a speed
+    replacement for a fused SSD kernel.
     """
 
     def __init__(self, c: HSpecReferenceConfig) -> None:
@@ -151,19 +153,47 @@ class SelectiveMamba2Reference(nn.Module):
             raise ValueError(
                 "initial_state has wrong [batch, head, width, state] shape"
             )
-        state = initial_state.float()
-        outputs = []
-        for index in range(length):
-            state = decay[:, index, :, None, None] * state + (
-                delta[:, index, :, None, None]
-                * values[:, index, :, :, None].float()
-                * b[:, index, :, None, :].float()
-            )
-            y = (state * c[:, index, :, None, :].float()).sum(-1)
-            y = y + self.d_skip.float()[None, :, None] * values[:, index].float()
-            outputs.append(y)
-        result = torch.stack(outputs, dim=1).reshape(batch, length, inner)
+        updates = (
+            delta[..., None, None] * values.float()[..., None] * b.float()[..., None, :]
+        )
+        states = _parallel_state_scan(decay, updates, initial_state.float())
+        result = (states * c.float()[..., None, :]).sum(-1)
+        result = result + self.d_skip.float()[None, None, :, None] * values.float()
+        result = result.reshape(batch, length, inner)
         return self.out_proj((result * functional.silu(z.float())).to(x.dtype))
+
+
+def _parallel_state_scan(
+    decay: torch.Tensor, updates: torch.Tensor, initial_state: torch.Tensor
+) -> torch.Tensor:
+    """Compute S[t] = decay[t] * S[t-1] + updates[t] in log2(T) stages.
+
+    A segment is represented by (a, u): applying it to an incoming state
+    yields a * state + u. Composition of adjacent segments is associative.
+    Keeping the initial state separate makes gradients reach the shared
+    hidden-state projection, including for a one-position block.
+    """
+    if decay.ndim != _SCAN_RANK or updates.shape[:_SCAN_RANK] != decay.shape:
+        raise ValueError("scan inputs must have matching [batch, time, heads]")
+    if initial_state.shape != updates.shape[:1] + updates.shape[2:]:
+        raise ValueError("initial state must have [batch, heads, width, state]")
+    products = decay
+    sums = updates
+    offset = 1
+    while offset < decay.shape[1]:
+        right_products = products[:, offset:]
+        products = torch.cat(
+            (products[:, :offset], right_products * products[:, :-offset]), dim=1
+        )
+        sums = torch.cat(
+            (
+                sums[:, :offset],
+                sums[:, offset:] + right_products[..., None, None] * sums[:, :-offset],
+            ),
+            dim=1,
+        )
+        offset *= 2
+    return sums + products[..., None, None] * initial_state[:, None]
 
 
 class TargetKVAttention(nn.Module):

@@ -15,6 +15,11 @@ end-to-end reproduction of the paper's throughput or acceptance results.
   the fourth has no attention. Attention is causal, position aligned, and
   limited to a 2,048-token window. Prefix K/V are borrowed tensors, not a
   persistent drafter-owned cache.
+- Block state evolution uses a logarithmic-depth associative scan with an
+  explicit, differentiable initial state. Tests compare its outputs and
+  gradients with the serial recurrence for different block lengths. This
+  PyTorch alignment path launches multiple operations; it is not a fused
+  Mamba-2/SSD inference kernel or a throughput result.
 - DSpark-style low-rank Markov logit bias conditioned on the previous **known**
   token during teacher-forced training. The reference includes a one-block
   training path with frozen target output and 0.1 CE + 0.9 TV loss.
@@ -39,10 +44,10 @@ prepared texts and target revision for a comparable run.
 
 ## Required before claiming a full H-Spec reproduction
 
-1. Replace the eager per-position SSD recurrence in `reference.py` with an
-   initial-state-aware **parallel Mamba-2 scan**, checking its outputs and
-   gradients against the eager reference. Check whether the paper retains
-   convolution state across blocks; the reference starts block convolution
+1. Replace the PyTorch associative scan in `reference.py` with an optimized
+   initial-state-aware **Mamba-2/SSD kernel**. Check its outputs and gradients
+   against the scan and serial recurrence. Check whether the paper retains
+   convolution state across blocks; this reference starts block convolution
    with zero history.
 2. Use the existing packed Speculators trainer with the selected target K/V
    and the *last hidden at each chosen anchor*. Current DFlash data files

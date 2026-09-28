@@ -7,7 +7,10 @@ import torch
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
 from speculators.models.hspec import HSpecReference, HSpecReferenceConfig, TargetContext
-from speculators.models.hspec.reference import TargetKVAttention
+from speculators.models.hspec.reference import (
+    TargetKVAttention,
+    _parallel_state_scan,
+)
 from speculators.models.hspec.training import ce_tv_loss, training_block
 
 
@@ -123,3 +126,33 @@ def test_kv_layout_rejected(config):
     wrong = tuple((torch.zeros(1, 2, 4, 8), torch.zeros(1, 2, 4, 8)) for _ in range(3))
     with pytest.raises(ValueError, match="target KV shape"):
         model(torch.tensor([[1, 31]]), TargetContext(torch.zeros(1, 5, 16), wrong))
+
+
+@pytest.mark.parametrize("length", [1, 2, 3, 7, 8, 16])
+def test_parallel_scan_matches_serial_forward_and_gradients(length):
+    torch.manual_seed(length)
+    decay = torch.rand(2, length, 3, dtype=torch.double) * 0.8 + 0.1
+    updates = torch.randn(2, length, 3, 2, 4, dtype=torch.double)
+    initial = torch.randn(2, 3, 2, 4, dtype=torch.double)
+    weights = torch.randn_like(updates)
+
+    def serial(a, u, state):
+        result = []
+        for index in range(length):
+            state = a[:, index, :, None, None] * state + u[:, index]
+            result.append(state)
+        return torch.stack(result, dim=1)
+
+    def run(scan):
+        inputs = [
+            tensor.clone().requires_grad_() for tensor in (decay, updates, initial)
+        ]
+        output = scan(*inputs)
+        gradients = torch.autograd.grad((output * weights).sum(), inputs)
+        return output, gradients
+
+    parallel_output, parallel_grads = run(_parallel_state_scan)
+    serial_output, serial_grads = run(serial)
+    torch.testing.assert_close(parallel_output, serial_output, atol=1e-12, rtol=1e-12)
+    for parallel, expected in zip(parallel_grads, serial_grads, strict=True):
+        torch.testing.assert_close(parallel, expected, atol=1e-12, rtol=1e-12)
