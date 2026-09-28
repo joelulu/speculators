@@ -7,7 +7,12 @@ import torch
 from torch.nn import functional
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from speculators.models.hspec import HSpecReference, HSpecReferenceConfig, TargetContext
+from speculators.models.hspec import (
+    HSpecReference,
+    HSpecReferenceConfig,
+    TargetContext,
+    context_from_vllm_pages,
+)
 from speculators.models.hspec.reference import (
     TargetKVAttention,
     _parallel_state_scan,
@@ -170,3 +175,43 @@ def test_ce_tv_loss_uses_dflash_position_weights():
     weights = torch.exp(-torch.arange(2).float() / 4)
     expected = ((0.1 * ce + 0.9 * tv) * weights).mean()
     torch.testing.assert_close(ce_tv_loss(draft, teacher, labels), expected)
+
+
+def test_borrowed_window_keeps_absolute_rope_positions(config):
+    torch.manual_seed(11)
+    attention = TargetKVAttention(config).eval()
+    prefix = (torch.randn(1, 1, 40, 8), torch.randn(1, 1, 40, 8))
+    block = torch.randn(1, 3, 16)
+    with torch.no_grad():
+        whole = attention(block, prefix, absolute_prefix_length=40)
+        window = attention(
+            block,
+            (prefix[0][:, :, -4:], prefix[1][:, :, -4:]),
+            absolute_prefix_length=40,
+        )
+    torch.testing.assert_close(whole, window)
+    with pytest.raises(ValueError, match="exceeds the confirmed prefix"):
+        attention(block, prefix, absolute_prefix_length=2)
+
+
+def test_vllm_paged_bridge_matches_dense_window(config):
+    pytest.importorskip("vllm.v1.spec_decode.hspec_kv")
+    torch.manual_seed(19)
+    names = [f"model.layers.{i - 1}.self_attn.attn" for i in (3, 4, 5)]
+    caches = {name: torch.randn(4, 2, 1, 16) for name in names}
+    before = {name: cache.clone() for name, cache in caches.items()}
+    table = {name: torch.tensor([2, 0, 3, 1]) for name in names}
+    last_hidden = torch.randn(1, 5, 16)
+    borrowed = context_from_vllm_pages(last_hidden, caches, table, 7, config)
+    dense_kv = []
+    for name in names:
+        logical = torch.cat([caches[name][page] for page in table[name]], dim=0)[:7]
+        key, value = logical.split(8, dim=-1)
+        dense_kv.append((key.transpose(0, 1)[None], value.transpose(0, 1)[None]))
+        torch.testing.assert_close(caches[name], before[name])
+    model = HSpecReference(config).eval()
+    block = torch.tensor([[2, 31, 31]])
+    with torch.no_grad():
+        expected = model(block, TargetContext(last_hidden, tuple(dense_kv), 7))
+        actual = model(block, borrowed)
+    torch.testing.assert_close(actual, expected)

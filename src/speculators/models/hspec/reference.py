@@ -71,6 +71,8 @@ class TargetContext:
 
     last_hidden: torch.Tensor
     prefix_kv: tuple[tuple[torch.Tensor, torch.Tensor], ...]
+    # Absolute confirmed length when prefix_kv contains only a borrowed window.
+    prefix_length: int | None = None
 
 
 class RMSNorm(nn.Module):
@@ -210,7 +212,10 @@ class TargetKVAttention(nn.Module):
         self.k_norm = RMSNorm(c.head_dim, c.rms_norm_eps)
 
     def forward(
-        self, x: torch.Tensor, prefix: tuple[torch.Tensor, torch.Tensor]
+        self,
+        x: torch.Tensor,
+        prefix: tuple[torch.Tensor, torch.Tensor],
+        absolute_prefix_length: int | None = None,
     ) -> torch.Tensor:
         c = self.c
         batch, length, _ = x.shape
@@ -223,11 +228,19 @@ class TargetKVAttention(nn.Module):
         if key.device != x.device or value.device != x.device:
             raise ValueError("target KV and drafter must share a device")
         prefix_len = key.shape[-2]
+        absolute_prefix_length = (
+            prefix_len if absolute_prefix_length is None else absolute_prefix_length
+        )
+        if absolute_prefix_length < prefix_len:
+            raise ValueError("borrowed KV window exceeds the confirmed prefix")
         # Slice before concatenation so temporary KV storage is O(window + block).
-        start = max(0, prefix_len - c.sliding_window)
-        key, value = key[:, :, start:], value[:, :, start:]
+        offset = max(0, prefix_len - c.sliding_window)
+        start = absolute_prefix_length - prefix_len + offset
+        key, value = key[:, :, offset:], value[:, :, offset:]
         positions = torch.arange(
-            prefix_len - 1, prefix_len + length - 1, device=x.device
+            absolute_prefix_length - 1,
+            absolute_prefix_length + length - 1,
+            device=x.device,
         )
         q = self.q_norm(
             self.q_proj(x).reshape(batch, length, c.num_attention_heads, c.head_dim)
@@ -243,7 +256,9 @@ class TargetKVAttention(nn.Module):
         group = c.num_attention_heads // c.num_key_value_heads
         k = k.repeat_interleave(group, dim=1)
         v = v.repeat_interleave(group, dim=1)
-        key_positions = torch.arange(start, prefix_len + length, device=x.device)
+        key_positions = torch.arange(
+            start, absolute_prefix_length + length, device=x.device
+        )
         allowed = (key_positions[None] <= positions[:, None]) & (
             key_positions[None] > positions[:, None] - c.sliding_window
         )
@@ -270,12 +285,13 @@ class HSpecLayer(nn.Module):
         x: torch.Tensor,
         initial_state: torch.Tensor,
         prefix: tuple[torch.Tensor, torch.Tensor] | None,
+        absolute_prefix_length: int | None = None,
     ) -> torch.Tensor:
         x = x + self.mamba(self.mamba_norm(x), initial_state)
         if self.attn is not None:
             if prefix is None:
                 raise ValueError("attention layer needs its mapped target KV")
-            x = x + self.attn(self.attn_norm(x), prefix)
+            x = x + self.attn(self.attn_norm(x), prefix, absolute_prefix_length)
         normalized = self.mlp_norm(x)
         return x + self.down_proj(
             functional.silu(self.gate_proj(normalized)) * self.up_proj(normalized)
@@ -367,6 +383,7 @@ class HSpecReference(nn.Module):
                 x,
                 initial_state,
                 target.prefix_kv[index] if index < _KV_LAYERS else None,
+                target.prefix_length,
             )
         logits = self.lm_head(self.norm(x))
         if previous_token_ids is not None:

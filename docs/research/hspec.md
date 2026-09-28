@@ -24,6 +24,13 @@ end-to-end reproduction of the paper's throughput or acceptance results.
   token during teacher-forced training. The reference includes a one-block
   training path with frozen target output, 0.1 CE + 0.9 TV loss, and DFlash's
   position weighting `exp(-(k-1)/4)` for draft positions `k=1..7`.
+- `context_from_vllm_pages` reads confirmed target KV from vLLM's
+  FlashAttention-format paged cache through `vllm.v1.spec_decode.hspec_kv`.
+  Each request supplies its own block table. It gathers at most the last
+  2,048 tokens into a temporary window and retains the absolute prefix length
+  for RoPE; it never writes to the verifier cache. This bridge supports
+  unquantized caches on one device and is a **correctness adapter**, not a
+  paged-attention serving implementation.
 
 ## Run a small alignment/training check
 
@@ -61,9 +68,9 @@ prepared texts and target revision for a comparable run.
 4. Extend vLLM's speculative drafter/target interface so the three H-Spec
    attention layers read the verifier's **paged** KV blocks in place. The
    Qwen3 query layout, RoPE positions, TP shards, window, request block table
-   and verifier KV lifetime must all match. Passing dense target K/V to the
-   Python reference materializes temporary windows and is **not** this
-   service integration. The verified target must still perform lossless
+   and verifier KV lifetime must all match. The correctness bridge above
+   materializes temporary windows and is **not** this service integration.
+   The verified target must still perform lossless
    speculative acceptance; do not treat draft logits alone as final output.
 5. Compare matched DFlash, DSpark and H-Spec checkpoints on mean accepted
    length and first rejection. Profile drafter/verify latency, separately

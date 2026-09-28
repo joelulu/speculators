@@ -54,7 +54,9 @@ def extract_context(
         kv.append(
             (key[:, :, :prefix_length].detach(), value[:, :, :prefix_length].detach())
         )
-    return TargetContext(last_hidden=last_hidden, prefix_kv=tuple(kv))
+    return TargetContext(
+        last_hidden=last_hidden, prefix_kv=tuple(kv), prefix_length=prefix_length
+    )
 
 
 def training_block(
