@@ -34,6 +34,28 @@ end-to-end reproduction of the paper's throughput or acceptance results.
 
 ## Run a small alignment/training check
 
+To compare the runnable DFlash baseline and the H-Spec reference on the same
+local Qwen3-4B target, use `examples/hspec/compare_dflash_hspec.sh`. It runs
+pretrained DFlash inference, a two-step DFlash training and inference check,
+then a two-step H-Spec training and offline inference check, in that order.
+It needs a compatible local Qwen3-4B DFlash checkpoint and **two GPUs** for
+DFlash's online trainer. For example:
+
+```bash
+MODEL=/home/jovyan/LMM/lmm_model/Qwen3-4B \
+DFLASH_DRAFT=/home/jovyan/LMM/lmm_model/Qwen3-4B-DFlash-b16 \
+VLLM_PYTHON=/path/to/vllm-env/bin/python \
+bash examples/hspec/compare_dflash_hspec.sh
+```
+
+Set `SPEC_PYTHON` if the Speculators environment is not `.venv-hspec`, and
+`GPU`/`TRAIN_GPU` if GPUs 0 and 1 are unavailable. `VLLM_PYTHON` must import
+both `vllm` and `hs_connectors`. Results are written to a new
+`hspec_comparison_<timestamp>` directory. This is a startup and training
+smoke test; the two-step checkpoints cannot serve as an acceptance or speed
+comparison. DFlash inference runs through vLLM; H-Spec inference uses the
+offline greedy verifier below.
+
 Install this repository and its dependencies in a GPU environment, then:
 
 ```bash
