@@ -139,6 +139,19 @@ def test_attention_cannot_see_future_block_positions(config):
     assert not torch.allclose(first[:, 2], second[:, 2])
 
 
+def test_bfloat16_attention_uses_target_kv_dtype(config):
+    attention = TargetKVAttention(config).to(dtype=torch.bfloat16)
+    block = torch.randn(1, 3, config.hidden_size, dtype=torch.bfloat16)
+    prefix = (
+        torch.randn(1, 1, 4, config.head_dim, dtype=torch.bfloat16),
+        torch.randn(1, 1, 4, config.head_dim, dtype=torch.bfloat16),
+    )
+    output = attention(block, prefix)
+    assert output.dtype == torch.bfloat16
+    output.float().sum().backward()
+    assert attention.q_proj.weight.grad is not None
+
+
 def test_kv_layout_rejected(config):
     model = HSpecReference(config)
     wrong = tuple((torch.zeros(1, 2, 4, 8), torch.zeros(1, 2, 4, 8)) for _ in range(3))

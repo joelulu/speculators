@@ -96,7 +96,7 @@ def _rope(x: torch.Tensor, positions: torch.Tensor, theta: float) -> torch.Tenso
     cosine = torch.cat((phase.cos(), phase.cos()), dim=-1)[None, None]
     sine = torch.cat((phase.sin(), phase.sin()), dim=-1)[None, None]
     a, b = x.chunk(2, dim=-1)
-    return x * cosine + torch.cat((-b, a), dim=-1) * sine
+    return (x * cosine + torch.cat((-b, a), dim=-1) * sine).to(x.dtype)
 
 
 class SelectiveMamba2Reference(nn.Module):
