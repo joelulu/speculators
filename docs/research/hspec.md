@@ -34,6 +34,29 @@ end-to-end reproduction of the paper's throughput or acceptance results.
 
 ## Run a small alignment/training check
 
+### Inspect one inference block with pdb
+
+Run `bash examples/hspec/debug_forward.sh dflash` and then
+`bash examples/hspec/debug_forward.sh hspec` from an interactive terminal.
+Both use the same raw prompt and target prefix; each stops immediately before
+the draft computation. Set `GPU`, `MODEL`, `DFLASH_DRAFT`, `SPEC_PYTHON`, or
+`HSPEC_CHECKPOINT` as needed. H-Spec defaults to `./hspec_smoke.pt`.
+Set `DEBUG=0` to run without pdb. No optimization steps or training losses run.
+
+At the DFlash stop, use `b Qwen3DFlashAttention.forward` then `c`; inspect
+`target_hidden`, `k_ctx`, `v_ctx`, and `past_key_values` while stepping with `n`.
+At the H-Spec stop, use `b HSpecReference.forward`,
+`b SelectiveMamba2Reference.forward`, and `b TargetKVAttention.forward` then `c`;
+inspect `target.last_hidden`, `initial_state`, `prefix`, and the block Q/K/V.
+These classes are imported into the debug entry point for pdb to resolve them.
+
+This harness calls the original Speculators DFlash decoder modules directly
+with eager attention and a fresh draft cache for one block. External DFlash
+weights are auto-converted into a separate local cache directory if needed.
+It does not emulate the vLLM scheduler, cache rollback, or repeated decode
+rounds. Printed draft text is **unverified**, so differences between the two
+drafts are expected and do not represent differences in verified target output.
+
 To compare the runnable DFlash baseline and the H-Spec reference on the same
 local Qwen3-4B target, use `examples/hspec/compare_dflash_hspec.sh`. It runs
 pretrained DFlash inference, a two-step DFlash training and inference check,
